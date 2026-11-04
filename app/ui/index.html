@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scissortail</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header id="toolbar">
+    <button class="btn" id="btnOpenFiles"></button>
+    <button class="btn" id="btnOpenFolder"></button>
+    <div class="sep"></div>
+    <div class="nav">
+      <button class="btn arrow" id="btnPrev"></button>
+      <div class="file-title"><span id="fileName">—</span><span id="filePos"></span></div>
+      <button class="btn arrow" id="btnNext"></button>
+    </div>
+    <button class="btn" id="btnReviewed"></button>
+    <div class="spacer"></div>
+    <div class="opts" id="dimSel"></div>
+    <div class="sep"></div>
+    <div class="opts" id="rowSel"></div>
+    <button class="opt" id="btnSpec"></button>
+    <div class="spacer"></div>
+    <button class="btn primary" id="btnExport"></button>
+    <button class="btn" id="btnSettings"></button>
+  </header>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div class="side-head">
+        <input id="filter" type="search" spellcheck="false" autocomplete="off">
+      </div>
+      <div id="fileList"></div>
+      <div id="legend"></div>
+      <div class="side-foot">
+        <span id="fileCount"></span>
+        <button class="btn small" id="btnClear"></button>
+      </div>
+    </aside>
+
+    <section id="work">
+      <div id="viewerWrap">
+        <div id="viewerHost"></div>
+        <div id="viewerBusy" class="hidden"><div class="spinner"></div><span id="viewerBusyText"></span></div>
+        <div id="selBar" class="hidden"></div>
+        <div id="empty" class="hidden"></div>
+      </div>
+      <div id="segBar"></div>
+      <div id="tableHost"></div>
+    </section>
+  </div>
+
+  <footer id="statusbar">
+    <span id="hint" class="panel"></span>
+    <span id="progress" class="panel"><span id="progressText"></span><span class="bar"><span></span></span></span>
+    <span id="modelStatus" class="panel"></span>
+  </footer>
+
+  <div id="dropOverlay" class="hidden"><div></div></div>
+  <div id="toasts"></div>
+  <div id="modalRoot"></div>
+
+  <script src="js/icons.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

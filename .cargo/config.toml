@@ -1,0 +1,17 @@
+# ONNX Runtime's prebuilt static library (CoreML EP) references clang
+# runtime builtins (`__isPlatformVersionAtLeast`), which rustc does not link
+# by default on macOS.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-fapple-link-rtlib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-fapple-link-rtlib"]
+
+# Windows: link the C runtime statically, so the program needs no Visual C++
+# or Universal CRT DLLs (Windows 7 machines often lack them). Goes with
+# `build.windows.staticVCRuntime: false` in tauri.windows.conf.json.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.4"

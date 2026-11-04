@@ -1,0 +1,13 @@
+# build output
+/target/
+/dist/
+/app/src-tauri/gen/schemas/
+
+# too large for git: the alignment model is published with each release
+# (see README, Building)
+/models/
+
+# earlier versions, kept on the build machine only
+/backup/
+
+.DS_Store

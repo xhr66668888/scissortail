@@ -1,0 +1,24 @@
+[package]
+name = "scissortail-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["onnxruntime"]
+# Inference engine for the speech models (see src/onnx.rs): ONNX Runtime, or
+# tract — pure Rust, for the Windows and Intel-Mac builds.
+onnxruntime = ["dep:ort"]
+tract = ["dep:tract-onnx"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+flate2.workspace = true
+realfft.workspace = true
+rustfft.workspace = true
+ort = { workspace = true, optional = true }
+tract-onnx = { workspace = true, optional = true }

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Scissortail",
+  "version": "0.2.0",
+  "identifier": "org.scissortail.workbench",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scissortail",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Medical",
+    "shortDescription": "Segment EMA trials and mark articulatory landmarks, MAVIS-style",
+    "copyright": "Scissortail contributors",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../../models/mms-fa-int8.onnx": "models/mms-fa-int8.onnx"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.4",
+      "signingIdentity": "-"
+    }
+  }
+}

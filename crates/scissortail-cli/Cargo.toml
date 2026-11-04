@@ -1,0 +1,20 @@
+[package]
+name = "scissortail-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scissortail"
+path = "src/main.rs"
+
+[features]
+default = ["onnxruntime"]
+onnxruntime = ["scissortail-core/onnxruntime"]
+tract = ["scissortail-core/tract"]
+
+[dependencies]
+scissortail-core = { path = "../scissortail-core", default-features = false }
+anyhow.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
