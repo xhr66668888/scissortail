@@ -459,11 +459,61 @@ function selectSegment(i) {
   renderTable();
 }
 
+// Measures of the protocols: short column names and units.
+const MEASURE_NAMES = {
+  JVC_Dur_ms: 'JVC duration', MaxJ_Disp_mm: 'Max jaw displacement', TT_Lat_ms: 'TT latency', TT_Pha_deg: 'TT phase angle',
+  PV1_mm_s: 'Peak lowering vel.', PV2_mm_s: 'Peak raising vel.', Jaw_Amp_mm: 'Jaw opening',
+};
+const GESTURE_MEASURES = [
+  ['dur_ms', 'Duration'], ['form_ms', 'Formation'], ['plateau_ms', 'Plateau'], ['release_ms', 'Release'], ['ttpv_ms', 'Time to peak vel.'],
+  ['disp_mm', 'Displacement'], ['pvel_mm_s', 'Peak velocity'], ['stiff_1_s', 'Stiffness'], ['onset_lag_ms', 'Onset lag'], ['target_lag_ms', 'Target lag'], ['maxc_lag_ms', 'Constriction lag'],
+];
+const unitOf = (m) => (m.unit === '°' ? '°' : m.unit);
+const digitsOf = (m) => (m.unit === 'mm' ? 2 : m.unit === '1/s' ? 1 : 1);
+
+function renderProtocolTable(host, o) {
+  const p = o.protocol;
+  const on = o.occurrence.start_s;
+  let html = '';
+  if (p.kind === 'gestures') {
+    const labels = [...new Set(p.measures.map((m) => m.id.slice(0, m.id.length - (GESTURE_MEASURES.find(([suf]) => m.id.endsWith('_' + suf))?.[0].length + 1 || 0))))];
+    const cols = GESTURE_MEASURES.filter(([suf]) => p.measures.some((m) => m.id.endsWith('_' + suf)));
+    html += `<table class="lm"><thead><tr><th>Gesture</th>${cols.map(([suf, name]) => {
+      const m = p.measures.find((x) => x.id.endsWith('_' + suf));
+      return `<th title="${esc(m.label)}">${esc(name)} <span class="unit">${esc(unitOf(m))}</span></th>`;
+    }).join('')}</tr></thead><tbody>`;
+    for (const g of labels) {
+      html += `<tr><td class="sensor">${esc(g)}</td>${cols.map(([suf]) => {
+        const m = p.measures.find((x) => x.id === `${g}_${suf}`);
+        return `<td>${m ? num(m.value, digitsOf(m)) : ''}</td>`;
+      }).join('')}</tr>`;
+    }
+    html += `</tbody></table>`;
+  } else {
+    html += `<table class="lm"><thead><tr><th>Measures</th>${p.measures.map((m) => `<th title="${esc(m.label)}">${esc(MEASURE_NAMES[m.id] || m.id)} <span class="unit">${esc(unitOf(m))}</span></th>`).join('')}</tr></thead>`;
+    html += `<tbody><tr><td class="sensor">${esc(o.occurrence.word)}</td>${p.measures.map((m) => `<td title="${esc(m.label)}">${num(m.value, digitsOf(m))}</td>`).join('')}</tr></tbody></table>`;
+  }
+  if (p.landmarks.length) {
+    html += `<table class="lm"><thead><tr><th>Landmark</th><th>Sensor</th><th>time <span class="unit">ms re onset</span></th><th>position <span class="unit">mm</span></th><th>velocity <span class="unit">mm/s</span></th><th class="left">found by</th></tr></thead><tbody>`;
+    for (const l of p.landmarks) {
+      const rel = (l.time_s - on) * 1000;
+      const cls = l.manual ? 'manual' : '';
+      html += `<tr><td class="sensor" title="${esc(l.id)}">${esc(l.label)}</td><td>${esc(l.reference ? `${l.sensor}−${l.reference}` : l.sensor)}</td>`
+        + `<td class="${cls}" title="${num(l.time_s, 4)} s">${rel >= 0 ? '+' : ''}${rel.toFixed(1)}</td><td>${num(l.position, 2)}</td><td>${num(l.velocity, 1)}</td><td class="left">${esc(l.criterion)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  const notes = [...(p.warnings || []), ...(S.result?.review || [])];
+  if (notes.length) html += `<div class="table-empty">${icon('warning')} ${esc(notes.join(' · '))}</div>`;
+  host.innerHTML = html;
+}
+
 function renderTable() {
   const host = $('#tableHost');
   const o = occ();
   if (!o) { host.innerHTML = ''; host.classList.add('hidden'); return; }
   host.classList.remove('hidden');
+  if (o.protocol) { renderProtocolTable(host, o); return; }
   const dk = dimKey(S.dim);
   const shown = new Set((S.view?.sensors || []).filter((s) => !s.is_reference).map((s) => s.name));
   const kins = o.kinematics.filter((k) => k.dim === dk && shown.has(k.sensor));
@@ -516,6 +566,26 @@ async function onLandmarkReset({ sensor, dim, kind }) {
   const file = S.current;
   try {
     applyResult(file, await API.invoke('reset_landmark', { file, index: S.seg, sensor, dim, kind }));
+    toast('Landmark back at the automatic position.');
+  } catch (e) {
+    toast(esc(errMsg(e)), 'bad');
+  }
+}
+
+async function onProtocolLandmarkChange({ id, time_s, snap_s }) {
+  const file = S.current;
+  try {
+    applyResult(file, await API.invoke('set_protocol_landmark', { file, index: S.seg, id, timeS: time_s, snapS: snap_s }));
+  } catch (e) {
+    toast(esc(errMsg(e)), 'bad');
+    reloadResult(file);
+  }
+}
+
+async function onProtocolLandmarkReset({ id }) {
+  const file = S.current;
+  try {
+    applyResult(file, await API.invoke('reset_protocol_landmark', { file, index: S.seg, id }));
     toast('Landmark back at the automatic position.');
   } catch (e) {
     toast(esc(errMsg(e)), 'bad');
@@ -617,6 +687,18 @@ function settingsDialog() {
   const speechOnly = cfg.locate.engine === 'speech';
   const wordRow = (w = { label: '', ipa: '', file_pattern: '' }) => `<tr><td><input type="text" data-k="label" value="${esc(w.label)}" placeholder="tadat"></td><td><input type="text" class="ipa" data-k="ipa" value="${esc(w.ipa)}" placeholder="tˈɑdɑt"></td><td><input type="text" class="mono" data-k="file_pattern" value="${esc(w.file_pattern)}" placeholder="ad_"></td><td><button class="btn small" data-del>×</button></td></tr>`;
   const dims = new Set(cfg.kinematics.dims);
+  const proto = cfg.protocol || { kind: 'peaks', jaw_cycle: {}, gestures: { gestures: [] } };
+  const jc = proto.jaw_cycle;
+  const gs = proto.gestures;
+  const opt = (v, cur, label) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
+  const gestureRow = (g = { label: '', sensor: '', reference: '', dim: 'z', direction: 'max', anchor_phone: 0 }) => `<tr>
+    <td><input type="text" data-k="label" value="${esc(g.label)}" placeholder="TT" style="width:60px"></td>
+    <td><input type="text" data-k="sensor" value="${esc(g.sensor)}" placeholder="TT" style="width:60px"></td>
+    <td><input type="text" data-k="reference" value="${esc(g.reference)}" placeholder="—" style="width:60px"></td>
+    <td><select data-k="dim">${opt('z', g.dim, 'z')}${opt('x', g.dim, 'x')}${opt('y', g.dim, 'y')}</select></td>
+    <td><select data-k="direction">${opt('max', g.direction, 'raising (max)')}${opt('min', g.direction, 'lowering (min)')}</select></td>
+    <td><input type="number" data-k="anchor_phone" value="${g.anchor_phone || 0}" min="0" step="1" style="width:48px"></td>
+    <td><button class="btn small" data-gdel>×</button></td></tr>`;
   const body = `
     <div class="field"><label>How to find the segment</label>
       <label class="radio"><input type="radio" name="mode" value="words" ${speechOnly ? '' : 'checked'}><span><span class="t">Target word (speech alignment)</span><br><span class="d">Finds the word the participant was asked to say, even inside a carrier phrase, among noise or other speech.</span></span></label>
@@ -629,6 +711,29 @@ function settingsDialog() {
         <table class="words"><thead><tr><th>Name</th><th>IPA</th><th>File-name code</th><th></th></tr></thead><tbody id="wordRows">${cfg.locate.words.map(wordRow).join('')}</tbody></table>
         <div class="inline" style="margin-top:6px"><button class="btn small" id="addWord">Add word</button><button class="btn small" id="resetWords">Default: “It’s a ___ again” (tadat / tatat / tedat / tetat)</button></div>
         <div class="help">A file whose name contains the code (e.g. ad_) is matched with that word only; otherwise the best-fitting word is used.</div></div>
+    </div>
+    <div class="field"><label>Measurement protocol</label>
+      <label class="radio"><input type="radio" name="proto" value="peaks" ${proto.kind === 'peaks' ? 'checked' : ''}><span><span class="t">Peaks (P / V / A)</span><br><span class="d">Position, velocity and acceleration peaks of every sensor in the segment.</span></span></label>
+      <label class="radio"><input type="radio" name="proto" value="jaw_cycle" ${proto.kind === 'jaw_cycle' ? 'checked' : ''}><span><span class="t">Jaw cycle + tongue-tip onset (Masapollo &amp; Nittrouer 2023)</span><br><span class="d">Six landmarks — V1, PV1, MaxDisp, PV2, TT onset, V2 — and from them the jaw vowel-cycle duration, maximum jaw displacement, TT latency and TT phase angle. For /tVCVt/-type words.</span></span></label>
+      <label class="radio"><input type="radio" name="proto" value="gestures" ${proto.kind === 'gestures' ? 'checked' : ''}><span><span class="t">Gestural landmarks (velocity threshold)</span><br><span class="d">Per articulator: onset, peak velocity, target, maximum constriction, release, peak velocity, offset (the MVIEW findgest convention) — durations, displacement, peak velocity, stiffness, and the lags between articulators.</span></span></label>
+    </div>
+    <div id="jcBox" class="field ${proto.kind === 'jaw_cycle' ? '' : 'hidden'}"><label>Jaw-cycle rules</label>
+      <div class="kin-grid">
+        <span>Jaw sensor</span><input type="text" id="jcJaw" value="${esc(jc.jaw_sensor || '')}" placeholder="auto (JAW)"><span class="muted"></span>
+        <span>Tongue sensor (medial consonant)</span><input type="text" id="jcTT" value="${esc(jc.tongue_sensor || '')}" placeholder="auto (TT)"><span class="muted"></span>
+        <span>Velocity criterion</span><input type="number" id="jcVel" min="1" step="1" value="${jc.velocity_threshold ?? 10}"><span class="muted">mm/s (10 = 1 cm/s)</span>
+        <span>Gradual onset: zero → criterion longer than</span><input type="number" id="jcGrad" min="0" step="1" value="${jc.gradual_ms ?? 10}"><span class="muted">ms (jaw)</span>
+        <span></span><input type="number" id="jcGradTT" min="0" step="1" value="${jc.tongue_gradual_ms ?? 15}"><span class="muted">ms (tongue)</span>
+        <span>Displacement criterion for weak lowerings</span><input type="number" id="jcWeak" min="0" step="5" value="${jc.weak_lowering_velocity ?? 0}"><span class="muted">mm/s peak (0 = off; ${jc.displacement_threshold ?? 0.5} mm below closure)</span>
+      </div>
+      <div class="inline" style="margin-top:8px"><label><input type="checkbox" id="jcRel" ${jc.tongue_minus_jaw !== false ? 'checked' : ''}>Time the tongue relative to the jaw (TT − JAW)</label></div>
+      <div class="help">Onsets are velocity zero crossings; when the movement starts gradually, the point where the velocity passes the criterion. Validated against two human coders on 2,269 tokens (10 talkers).</div>
+    </div>
+    <div id="gsBox" class="field ${proto.kind === 'gestures' ? '' : 'hidden'}"><label>Gestures</label>
+      <table class="words"><thead><tr><th>Name</th><th>Sensor</th><th>minus</th><th>Dim</th><th>Constriction</th><th>Phone #</th><th></th></tr></thead><tbody id="gsRows">${(gs.gestures || []).map(gestureRow).join('')}</tbody></table>
+      <div class="inline" style="margin-top:6px"><button class="btn small" id="gsAdd">Add gesture</button>
+        <span>Threshold</span><input type="number" id="gsThr" min="5" max="50" step="5" value="${Math.round((gs.threshold ?? 0.2) * 100)}" style="width:52px"><span class="muted">% of peak velocity</span></div>
+      <div class="help">Phone # picks the constriction nearest that phone of the aligned word (0 = the largest in the word). Lags are measured from the first gesture.</div>
     </div>
     <div class="field"><label>Kinematics</label>
       <div class="kin-grid">
@@ -646,6 +751,15 @@ function settingsDialog() {
       const bindRows = () => $$('[data-del]', rows).forEach((b) => (b.onclick = () => b.closest('tr').remove()));
       bindRows();
       $$('input[name="mode"]', root).forEach((r) => r.addEventListener('change', () => $('#wordsBox', root).classList.toggle('hidden', r.value === 'speech' && r.checked)));
+      $$('input[name="proto"]', root).forEach((r) => r.addEventListener('change', () => {
+        const k = $('input[name="proto"]:checked', root).value;
+        $('#jcBox', root).classList.toggle('hidden', k !== 'jaw_cycle');
+        $('#gsBox', root).classList.toggle('hidden', k !== 'gestures');
+      }));
+      const gsRows = $('#gsRows', root);
+      const bindG = () => $$('[data-gdel]', gsRows).forEach((b) => (b.onclick = () => b.closest('tr').remove()));
+      bindG();
+      $('#gsAdd', root).addEventListener('click', () => { gsRows.insertAdjacentHTML('beforeend', gestureRow()); bindG(); });
       $('#addWord', root).addEventListener('click', () => { rows.insertAdjacentHTML('beforeend', wordRow()); bindRows(); });
       $('#resetWords', root).addEventListener('click', async () => {
         const def = await API.invoke('default_settings');
@@ -664,6 +778,20 @@ function settingsDialog() {
         cfg.kinematics.sg_window_ms = Math.max(10, +$('#setSg', root).value || 40);
         cfg.kinematics.dims = $$('[data-dim]', root).filter((c) => c.checked).map((c) => c.dataset.dim);
         if (!cfg.kinematics.dims.length) cfg.kinematics.dims = ['z'];
+        proto.kind = $('input[name="proto"]:checked', root).value;
+        Object.assign(jc, {
+          jaw_sensor: $('#jcJaw', root).value.trim(), tongue_sensor: $('#jcTT', root).value.trim(),
+          velocity_threshold: Math.max(1, +$('#jcVel', root).value || 10), gradual_ms: Math.max(0, +$('#jcGrad', root).value || 0),
+          tongue_gradual_ms: Math.max(0, +$('#jcGradTT', root).value || 0), weak_lowering_velocity: Math.max(0, +$('#jcWeak', root).value || 0),
+          tongue_minus_jaw: $('#jcRel', root).checked,
+        });
+        gs.threshold = Math.min(0.5, Math.max(0.05, (+$('#gsThr', root).value || 20) / 100));
+        gs.gestures = $$('tr', gsRows).map((tr) => ({
+          label: $('[data-k="label"]', tr).value.trim(), sensor: $('[data-k="sensor"]', tr).value.trim(), reference: $('[data-k="reference"]', tr).value.trim(),
+          dim: $('[data-k="dim"]', tr).value, direction: $('[data-k="direction"]', tr).value, anchor_phone: Math.max(0, Math.round(+$('[data-k="anchor_phone"]', tr).value || 0)),
+        })).filter((g) => g.sensor);
+        if (proto.kind === 'gestures' && !gs.gestures.length) { toast('Add at least one gesture (sensor), or choose another protocol.', 'bad'); return; }
+        cfg.protocol = proto;
         close();
         try {
           const ws = await API.invoke('set_config', { config: cfg });
@@ -686,7 +814,9 @@ async function exportCsv() {
     const r = await API.invoke('export_csv');
     if (!r) return;
     const skipped = r.skipped ? ` ${r.skipped} files are not analysed yet and were left out.` : '';
-    toast(`Landmarks of ${r.files} files exported: <a data-reveal="${esc(r.path)}">${esc(r.path.split(/[\\/]/).pop())}</a>.${esc(skipped)}`, 'info', 9000);
+    const link = (p) => `<a data-reveal="${esc(p)}">${esc(p.split(/[\\/]/).pop())}</a>`;
+    const measures = r.measures_path ? ` Protocol measures: ${link(r.measures_path)}.` : '';
+    toast(`Landmarks of ${r.files} files exported: ${link(r.path)}.${measures}${esc(skipped)}`, 'info', 9000);
   } catch (e) {
     toast(esc(errMsg(e)), 'bad');
   }
@@ -867,6 +997,8 @@ async function init() {
     onSegmentChange,
     onLandmarkChange,
     onLandmarkReset,
+    onProtocolLandmarkChange,
+    onProtocolLandmarkReset,
     onSegmentSelect: selectSegment,
     onSelectRange: (a, b) => (a == null ? hideSelBar() : showSelBar(a, b)),
     onZoomToggle: () => { toggleZoomMode(); renderSegBar(); },

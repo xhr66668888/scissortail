@@ -19,12 +19,14 @@ use serde_json::{json, Value};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use scissortail_core::analysis::{has_target_words, kinematics_for, refresh_kinematics, AnalysisConfig, Analyzer, OccurrenceResult, TrialResult, TrialStatus};
+use scissortail_core::analysis::{apply_protocol_status, has_target_words, kinematics_for, refresh_kinematics, AnalysisConfig, Analyzer, OccurrenceResult, TrialResult, TrialStatus};
 use scissortail_core::dsp::{resample, spectrogram_u8};
-use scissortail_core::export::landmarks_csv;
+use scissortail_core::export::{landmarks_csv, measures_csv};
 use scissortail_core::kinematics::{derivatives, manual_peak, Dim, KinematicsConfig, Landmark};
 use scissortail_core::locate::{candidate_words, Engine, Occurrence};
-use scissortail_core::trial::Trial;
+use scissortail_core::protocol::{self, ProtocolKind};
+use scissortail_core::review::review_outliers;
+use scissortail_core::trial::{Sensor, Trial};
 
 use state::{engines, AppState, Foreground, Workspace};
 
@@ -221,6 +223,7 @@ async fn remove_files(files: Vec<String>, app: tauri::AppHandle) -> CmdResult<Va
             for f in &files {
                 ws.results.remove(f);
             }
+            review_workspace(&mut ws);
             workspace_view(&ws)
         };
         state.save();
@@ -264,7 +267,9 @@ fn analyze_now(state: &AppState, file: &str) -> CmdResult<TrialResult> {
     if state.generation.load(Ordering::SeqCst) != gen || !ws.files.iter().any(|f| f == file) {
         return Ok(r);
     }
-    Ok(ws.results.entry(file.to_string()).or_insert(r).clone())
+    ws.results.entry(file.to_string()).or_insert(r);
+    review_workspace(&mut ws);
+    Ok(ws.results[file].clone())
 }
 
 /// Starts the background worker unless it is running: it analyses every file
@@ -337,30 +342,76 @@ fn run_pending(app: &tauri::AppHandle, state: &AppState, pool: Option<&rayon::Th
             Some(p) => p.install(work),
             None => work(),
         }
+        let summaries: Vec<Value> = {
+            let mut ws = state.ws.lock().unwrap();
+            let changed = review_workspace(&mut ws);
+            changed.iter().map(|f| file_summary(f, ws.results.get(f))).collect()
+        };
+        for s in summaries {
+            let _ = app.emit("trial-updated", s);
+        }
         state.save();
     }
 }
 
 // ----------------------------------------------------------------- trials --
 
-fn signals_json(trial: &Trial, cfg: &KinematicsConfig) -> Vec<Value> {
-    trial
-        .sensors
-        .iter()
-        .map(|s| {
-            let mut dims = serde_json::Map::new();
-            for dim in Dim::all() {
-                if let Some(d) = derivatives(s, dim, cfg) {
-                    let r = |v: &[f64], k: i32| v.iter().map(|&x| round(x, k)).collect::<Vec<f64>>();
-                    dims.insert(dim.label().to_string(), json!({ "pos": r(&d.pos, 3), "vel": r(&d.vel, 1), "acc": r(&d.acc, 0) }));
-                }
-            }
-            json!({ "name": s.name, "fs": s.fs, "n": s.len(), "is_reference": s.looks_like_reference(), "dims": dims })
-        })
-        .collect()
+fn sensor_json(s: &Sensor, cfg: &KinematicsConfig, derived: bool) -> Value {
+    let mut dims = serde_json::Map::new();
+    for dim in Dim::all() {
+        if let Some(d) = derivatives(s, dim, cfg) {
+            let r = |v: &[f64], k: i32| v.iter().map(|&x| round(x, k)).collect::<Vec<f64>>();
+            dims.insert(dim.label().to_string(), json!({ "pos": r(&d.pos, 3), "vel": r(&d.vel, 1), "acc": r(&d.acc, 0) }));
+        }
+    }
+    json!({ "name": s.name, "fs": s.fs, "n": s.len(), "is_reference": !derived && s.looks_like_reference(), "derived": derived, "dims": dims })
 }
 
-fn trial_view_json(file: &str, cfg: &KinematicsConfig, result: Option<&TrialResult>) -> CmdResult<Value> {
+/// Pairs (sensor, reference) whose difference the protocol times landmarks on.
+fn derived_pairs(trial: &Trial, cfg: &AnalysisConfig) -> Vec<(String, String)> {
+    let p = &cfg.protocol;
+    let mut out: Vec<(String, String)> = vec![];
+    let mut push = |a: Option<String>, b: Option<String>| {
+        if let (Some(a), Some(b)) = (a, b) {
+            if !out.contains(&(a.clone(), b.clone())) {
+                out.push((a, b));
+            }
+        }
+    };
+    let name = |n: &str| trial.sensor(n).map(|s| s.name.clone());
+    match p.kind {
+        ProtocolKind::JawCycle if p.jaw_cycle.tongue_minus_jaw => {
+            let auto = |want: &str, pats: &[&str]| -> Option<String> {
+                if !want.trim().is_empty() {
+                    return name(want.trim());
+                }
+                pats.iter().find_map(|p| trial.sensors.iter().find(|s| s.name.eq_ignore_ascii_case(p)).map(|s| s.name.clone()))
+            };
+            push(auto(&p.jaw_cycle.tongue_sensor, &["TT", "TTIP", "TIP"]), auto(&p.jaw_cycle.jaw_sensor, &["JAW", "JA", "MAND", "LI", "CHIN"]));
+        }
+        ProtocolKind::Gestures => {
+            for g in &p.gestures.gestures {
+                if !g.reference.trim().is_empty() {
+                    push(name(&g.sensor), name(&g.reference));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn signals_json(trial: &Trial, cfg: &AnalysisConfig) -> Vec<Value> {
+    let mut out: Vec<Value> = trial.sensors.iter().map(|s| sensor_json(s, &cfg.kinematics, false)).collect();
+    for (a, b) in derived_pairs(trial, cfg) {
+        if let Some(d) = trial.sensor(&a).zip(trial.sensor(&b)).and_then(|(a, b)| protocol::difference(a, b)) {
+            out.push(sensor_json(&d, &cfg.kinematics, true));
+        }
+    }
+    out
+}
+
+fn trial_view_json(file: &str, cfg: &AnalysisConfig, result: Option<&TrialResult>) -> CmdResult<Value> {
     let trial = Trial::load(Path::new(file)).map_err(err)?;
     let fs_play = 24000.0;
     let a24 = resample(&trial.audio.samples, trial.audio.fs, fs_play);
@@ -387,7 +438,7 @@ async fn load_trial(file: String, app: tauri::AppHandle) -> CmdResult<Value> {
         let state = app.state::<AppState>();
         let (cfg, result) = {
             let ws = state.ws.lock().unwrap();
-            (ws.config.kinematics.clone(), ws.results.get(&file).cloned())
+            (ws.config.clone(), ws.results.get(&file).cloned())
         };
         trial_view_json(&file, &cfg, result.as_ref())
     })
@@ -432,19 +483,44 @@ async fn reanalyze(file: String, app: tauri::AppHandle) -> CmdResult<Value> {
 // ------------------------------------------------------------------ edits --
 
 /// Applies an edit to the stored result of `file` and saves the workspace.
-fn edit<F: FnOnce(&mut TrialResult) -> CmdResult<()>>(state: &AppState, file: &str, f: F) -> CmdResult<Value> {
-    let out = {
+fn edit<F: FnOnce(&mut TrialResult) -> CmdResult<()>>(app: &tauri::AppHandle, file: &str, f: F) -> CmdResult<Value> {
+    let state = app.state::<AppState>();
+    let (out, others) = {
         let mut ws = state.ws.lock().unwrap();
         let r = ws.results.get_mut(file).ok_or("this file has not been analysed yet")?;
         f(r)?;
-        result_json(file, r)
+        // an edit can change which repetitions of the condition stand out
+        let changed = review_workspace(&mut ws);
+        let others: Vec<Value> = changed.iter().filter(|c| c.as_str() != file).map(|c| file_summary(c, ws.results.get(c))).collect();
+        (result_json(file, &ws.results[file]), others)
     };
+    for summary in others {
+        let _ = app.emit("trial-updated", summary);
+    }
     state.save();
     Ok(out)
 }
 
+/// The review across trials (a protocol measure far from the other
+/// repetitions of its condition marks the trial "please check"); returns the
+/// files whose status changed.
+fn review_workspace(ws: &mut Workspace) -> Vec<String> {
+    let cfg = ws.config.protocol.review.clone();
+    let mut files = vec![];
+    let mut refs = vec![];
+    for (f, r) in ws.results.iter_mut() {
+        files.push(f.clone());
+        refs.push(r);
+    }
+    review_outliers(&mut refs, &cfg).into_iter().map(|i| files[i].clone()).collect()
+}
+
 fn kinematics_cfg(state: &AppState) -> KinematicsConfig {
     state.ws.lock().unwrap().config.kinematics.clone()
+}
+
+fn analysis_cfg(state: &AppState) -> AnalysisConfig {
+    state.ws.lock().unwrap().config.clone()
 }
 
 #[tauri::command]
@@ -454,9 +530,9 @@ async fn update_segment(file: String, index: usize, start_s: f64, end_s: f64, ap
         if end_s <= start_s + 0.01 {
             return Err("the offset must come after the onset".into());
         }
-        let cfg = kinematics_cfg(&state);
+        let cfg = analysis_cfg(&state);
         let trial = Trial::load(Path::new(&file)).map_err(err)?;
-        edit(&state, &file, |r| {
+        edit(&app, &file, |r| {
             let o = r.occurrences.get_mut(index).ok_or("no such segment")?;
             o.occurrence.start_s = start_s;
             o.occurrence.end_s = end_s;
@@ -471,6 +547,7 @@ async fn update_segment(file: String, index: usize, start_s: f64, end_s: f64, ap
             if r.status == TrialStatus::NotFound {
                 r.status = TrialStatus::Ok;
             }
+            apply_protocol_status(r);
             Ok(())
         })
     })
@@ -486,10 +563,11 @@ async fn add_segment(file: String, start_s: f64, end_s: f64, app: tauri::AppHand
         if end_s <= start_s + 0.01 {
             return Err("the segment is too short".into());
         }
-        let (cfg, words) = {
+        let (full, words) = {
             let ws = state.ws.lock().unwrap();
-            (ws.config.kinematics.clone(), ws.config.locate.clone())
+            (ws.config.clone(), ws.config.locate.clone())
         };
+        let cfg = full.kinematics.clone();
         let trial = Trial::load(Path::new(&file)).map_err(err)?;
         let file_name = Path::new(&file).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let word = if has_target_words(&words) {
@@ -511,13 +589,15 @@ async fn add_segment(file: String, start_s: f64, end_s: f64, app: tauri::AppHand
             engine: Engine::Speech,
         };
         let kinematics = kinematics_for(&trial, &occ, &cfg);
-        edit(&state, &file, |r| {
-            r.occurrences.push(OccurrenceResult { occurrence: occ, kinematics, edited: true });
+        let protocol = protocol::compute(&trial, &occ, &full.protocol, &cfg, &[]);
+        edit(&app, &file, |r| {
+            r.occurrences.push(OccurrenceResult { occurrence: occ, kinematics, edited: true, protocol });
             r.occurrences.sort_by(|a, b| a.occurrence.start_s.partial_cmp(&b.occurrence.start_s).unwrap());
             if matches!(r.status, TrialStatus::NotFound | TrialStatus::Error) {
                 r.status = TrialStatus::Ok;
                 r.message.clear();
             }
+            apply_protocol_status(r);
             Ok(())
         })
     })
@@ -528,7 +608,7 @@ async fn add_segment(file: String, start_s: f64, end_s: f64, app: tauri::AppHand
 #[tauri::command]
 async fn delete_segment(file: String, index: usize, app: tauri::AppHandle) -> CmdResult<Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        edit(&app.state::<AppState>(), &file, |r| {
+        edit(&app, &file, |r| {
             if index < r.occurrences.len() {
                 r.occurrences.remove(index);
             }
@@ -553,7 +633,7 @@ async fn set_landmark(file: String, index: usize, sensor: String, dim: Dim, kind
         let trial = Trial::load(Path::new(&file)).map_err(err)?;
         let s = trial.sensor(&sensor).ok_or("no such sensor")?;
         let peak = manual_peak(s, dim, kind, time_s, snap_s.max(0.0), &cfg).ok_or("this signal is too short")?;
-        edit(&state, &file, |r| {
+        edit(&app, &file, |r| {
             let o = r.occurrences.get_mut(index).ok_or("no such segment")?;
             let k = o.kinematics.iter_mut().find(|k| k.sensor.eq_ignore_ascii_case(&sensor) && k.dim == dim).ok_or("this sensor dimension is not analysed")?;
             *k.peak_mut(kind) = Some(peak);
@@ -572,7 +652,7 @@ async fn reset_landmark(file: String, index: usize, sensor: String, dim: Dim, ki
         let state = app.state::<AppState>();
         let cfg = kinematics_cfg(&state);
         let trial = Trial::load(Path::new(&file)).map_err(err)?;
-        edit(&state, &file, |r| {
+        edit(&app, &file, |r| {
             let o = r.occurrences.get_mut(index).ok_or("no such segment")?;
             let auto = kinematics_for(&trial, &o.occurrence, &cfg)
                 .into_iter()
@@ -587,10 +667,66 @@ async fn reset_landmark(file: String, index: usize, sensor: String, dim: Dim, ki
     .map_err(err)?
 }
 
+/// Moves a landmark of the measurement protocol by hand (`snap_s` > 0: to
+/// the nearest extremum of its curve within ±`snap_s`); the automatic
+/// landmarks that depend on it and every measure are recomputed.
+#[tauri::command]
+async fn set_protocol_landmark(file: String, index: usize, id: String, time_s: f64, snap_s: f64, app: tauri::AppHandle) -> CmdResult<Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let cfg = analysis_cfg(&state);
+        let trial = Trial::load(Path::new(&file)).map_err(err)?;
+        edit(&app, &file, |r| {
+            let o = r.occurrences.get_mut(index).ok_or("no such segment")?;
+            let p = o.protocol.as_ref().ok_or("this segment has no protocol landmarks")?;
+            let mut l = p.landmark(&id).ok_or("no such landmark")?.clone();
+            let mut t = time_s;
+            if snap_s > 0.0 {
+                let sensor = trial.sensor(&l.sensor).ok_or("no such sensor")?;
+                let diff = if l.reference.is_empty() { None } else { trial.sensor(&l.reference).and_then(|b| protocol::difference(sensor, b)) };
+                if let Some(pk) = manual_peak(diff.as_ref().unwrap_or(sensor), l.dim, l.curve, time_s, snap_s, &cfg.kinematics) {
+                    t = pk.time_s;
+                }
+            }
+            l.time_s = t;
+            l.manual = true;
+            let mut fixed = protocol::manual_landmarks(Some(p));
+            fixed.retain(|x| x.id != id);
+            fixed.push(l);
+            o.protocol = protocol::compute(&trial, &o.occurrence, &cfg.protocol, &cfg.kinematics, &fixed);
+            o.edited = true;
+            apply_protocol_status(r);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Puts a hand-placed protocol landmark back where the automatic rules have it.
+#[tauri::command]
+async fn reset_protocol_landmark(file: String, index: usize, id: String, app: tauri::AppHandle) -> CmdResult<Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let cfg = analysis_cfg(&state);
+        let trial = Trial::load(Path::new(&file)).map_err(err)?;
+        edit(&app, &file, |r| {
+            let o = r.occurrences.get_mut(index).ok_or("no such segment")?;
+            let mut fixed = protocol::manual_landmarks(o.protocol.as_ref());
+            fixed.retain(|x| x.id != id);
+            o.protocol = protocol::compute(&trial, &o.occurrence, &cfg.protocol, &cfg.kinematics, &fixed);
+            apply_protocol_status(r);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 async fn set_reviewed(file: String, reviewed: bool, app: tauri::AppHandle) -> CmdResult<Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        edit(&app.state::<AppState>(), &file, |r| {
+        edit(&app, &file, |r| {
             r.reviewed = reviewed;
             Ok(())
         })
@@ -602,8 +738,8 @@ async fn set_reviewed(file: String, reviewed: bool, app: tauri::AppHandle) -> Cm
 // --------------------------------------------------------------- settings --
 
 /// New settings. Changed target words re-run the segmentation of every file
-/// not edited or reviewed by hand; changed kinematics settings only
-/// recompute the landmarks (hand-placed ones stay where they are).
+/// not edited or reviewed by hand; changed kinematics or protocol settings
+/// only recompute the landmarks (hand-placed ones stay where they are).
 #[tauri::command]
 async fn set_config(config: AnalysisConfig, app: tauri::AppHandle) -> CmdResult<Value> {
     let app2 = app.clone();
@@ -617,7 +753,7 @@ async fn set_config(config: AnalysisConfig, app: tauri::AppHandle) -> CmdResult<
         };
         state.generation.fetch_add(1, Ordering::SeqCst);
         *state.analyzer_cache.lock().unwrap() = None;
-        let cfg = config.kinematics;
+        let cfg = config;
         let updated: Vec<(String, Option<TrialResult>)> = results
             .into_par_iter()
             .map(|(f, mut r)| {
@@ -627,6 +763,7 @@ async fn set_config(config: AnalysisConfig, app: tauri::AppHandle) -> CmdResult<
                 }
                 if let Ok(trial) = Trial::load(Path::new(&f)) {
                     r.occurrences.iter_mut().for_each(|o| refresh_kinematics(&trial, o, &cfg));
+                    apply_protocol_status(&mut r);
                 }
                 (f, Some(r))
             })
@@ -639,6 +776,7 @@ async fn set_config(config: AnalysisConfig, app: tauri::AppHandle) -> CmdResult<
                     None => ws.results.remove(&f),
                 };
             }
+            review_workspace(&mut ws);
             workspace_view(&ws)
         };
         state.save();
@@ -661,7 +799,7 @@ fn default_settings() -> AnalysisConfig {
 /// Returns `null` when the dialog is cancelled.
 #[tauri::command]
 async fn export_csv(app: tauri::AppHandle) -> CmdResult<Value> {
-    let (csv, n, skipped, dir) = {
+    let (csv, measures, n, skipped, dir) = {
         let state = app.state::<AppState>();
         let ws = state.ws.lock().unwrap();
         let rows: Vec<(String, &TrialResult)> = ws
@@ -677,7 +815,8 @@ async fn export_csv(app: tauri::AppHandle) -> CmdResult<Value> {
         }
         let refs: Vec<(&str, &TrialResult)> = rows.iter().map(|(s, r)| (s.as_str(), *r)).collect();
         let dir = ws.files.first().and_then(|f| Path::new(f).parent().and_then(|d| d.parent()).map(|d| d.to_path_buf()));
-        (landmarks_csv(&refs), rows.len(), ws.files.len() - rows.len(), dir)
+        let has_protocol = refs.iter().any(|(_, r)| r.occurrences.iter().any(|o| o.protocol.is_some()));
+        (landmarks_csv(&refs), has_protocol.then(|| measures_csv(&refs)), rows.len(), ws.files.len() - rows.len(), dir)
     };
     let name = format!("scissortail_landmarks_{}.csv", state::timestamp());
     let picked = on_dialog_thread(move || {
@@ -690,7 +829,17 @@ async fn export_csv(app: tauri::AppHandle) -> CmdResult<Value> {
     .await?;
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(Value::Null) };
     std::fs::write(&path, csv).map_err(err)?;
-    Ok(json!({ "path": path.display().to_string(), "files": n, "skipped": skipped }))
+    // the protocol's landmarks and measures, one row per segment, next to it
+    let measures_path = match measures {
+        Some(m) => {
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mp = path.with_file_name(format!("{}_measures.csv", stem.trim_end_matches("_landmarks")));
+            std::fs::write(&mp, m).map_err(err)?;
+            Some(mp.display().to_string())
+        }
+        None => None,
+    };
+    Ok(json!({ "path": path.display().to_string(), "measures_path": measures_path, "files": n, "skipped": skipped }))
 }
 
 #[tauri::command]
@@ -736,7 +885,7 @@ fn dump_fixtures(root: &str, out: &str) -> CmdResult<()> {
     write("analysis_default.json".into(), &result_json(&picked[0], &first))?;
     for f in &picked {
         let id = Path::new(f).file_stem().unwrap().to_string_lossy().to_string();
-        write(format!("trial_{id}.json"), &trial_view_json(f, &ws.config.kinematics, ws.results.get(f))?)?;
+        write(format!("trial_{id}.json"), &trial_view_json(f, &ws.config, ws.results.get(f))?)?;
     }
     println!("wrote fixtures for {} trials to {}", picked.len(), out.display());
     Ok(())
@@ -800,6 +949,8 @@ fn main() {
             delete_segment,
             set_landmark,
             reset_landmark,
+            set_protocol_landmark,
+            reset_protocol_landmark,
             set_reviewed,
             set_config,
             default_settings,

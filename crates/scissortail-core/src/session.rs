@@ -50,6 +50,18 @@ pub fn trial_number(name: &str) -> Option<u32> {
     last
 }
 
+/// The condition part of a trial name: its tokens without plain numbers and
+/// trial numbers ("T10_T292_SSad_1_NH_A_6" → "SSad_NH_A", "T0003" → "").
+/// Trials of one session with the same key are repetitions of one condition.
+pub fn condition_key(name: &str) -> String {
+    let is_number = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+    let is_trial = |t: &str| t.len() > 1 && (t.starts_with('T') || t.starts_with('t')) && is_number(&t[1..]);
+    name.split(['_', '-', ' ', '.'])
+        .filter(|t| !t.is_empty() && !is_number(t) && !is_trial(t))
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 /// Letters-only token after the last trial number, e.g. "T3_T137_FUad_" → "FUad".
 pub fn condition_code(name: &str) -> String {
     name.split('_')

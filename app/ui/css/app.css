@@ -347,6 +347,8 @@ table.lm td.manual { font-weight: 700; }
 table.lm td.manual::after { content: " ✎"; font-family: var(--font); font-weight: 400; }
 table.lm td.edge { font-style: italic; }
 table.lm .unit { color: var(--muted); }
+table.lm th.left, table.lm td.left { text-align: left; font-family: var(--font); }
+#tableHost table.lm + table.lm { border-top: 1px solid var(--lo); }
 .table-empty { padding: 8px 10px; color: var(--muted); font-size: 11px; }
 
 /* -------------------------------------------------------------- statusbar */

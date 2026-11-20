@@ -165,6 +165,24 @@ const API = (() => {
           if (orig && k) k[a.kind] = clone(orig[a.kind]);
           return this.answer(a.file);
         }
+        // protocol landmarks: moved / put back only (the measures are not
+        // recomputed in the browser preview — the desktop backend does that)
+        case 'set_protocol_landmark': {
+          const r = await this.result(a.file);
+          const o = r.occurrences[a.index];
+          const l = o.protocol?.landmarks.find((x) => x.id === a.id);
+          if (l) Object.assign(l, { time_s: a.timeS, manual: true, criterion: 'by hand' });
+          o.edited = true;
+          return this.answer(a.file);
+        }
+        case 'reset_protocol_landmark': {
+          const r = await this.result(a.file);
+          const orig = this.originals.get(a.file).occurrences[a.index]?.protocol?.landmarks.find((x) => x.id === a.id);
+          const ls = r.occurrences[a.index].protocol?.landmarks || [];
+          const i = ls.findIndex((x) => x.id === a.id);
+          if (orig && i >= 0) ls[i] = clone(orig);
+          return this.answer(a.file);
+        }
         case 'set_reviewed': {
           const r = await this.result(a.file);
           r.reviewed = a.reviewed;

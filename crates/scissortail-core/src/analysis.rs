@@ -10,6 +10,7 @@ use crate::aligner::PhoneticAligner;
 use crate::error::{Error, Result};
 use crate::kinematics::{analyze_window, manual_peak, KinematicResult, KinematicsConfig, Landmark};
 use crate::locate::{build_templates, locate_phonetic, locate_speech, locate_template, refine_boundaries, Engine, LocateConfig, Occurrence, PhraseTemplate};
+use crate::protocol::{self, ProtocolConfig, ProtocolResult};
 use crate::trial::Trial;
 use crate::tts::Tts;
 
@@ -18,6 +19,8 @@ use crate::tts::Tts;
 pub struct AnalysisConfig {
     pub locate: LocateConfig,
     pub kinematics: KinematicsConfig,
+    /// Measurement protocol (which landmarks and measures are derived).
+    pub protocol: ProtocolConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +30,10 @@ pub struct OccurrenceResult {
     /// Set when the researcher moved the boundaries by hand.
     #[serde(default)]
     pub edited: bool,
+    /// Landmarks and measures of the measurement protocol (none for the
+    /// plain peaks protocol).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProtocolResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +59,10 @@ pub struct TrialResult {
     pub reviewed: bool,
     #[serde(default)]
     pub note: String,
+    /// Notes of the review across trials (`review::review_outliers`): a
+    /// measure far from the other repetitions of its condition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<String>,
 }
 
 /// Loaded models (shared, thread-safe).
@@ -122,6 +133,7 @@ impl<'a> Analyzer<'a> {
                 occurrences: vec![],
                 reviewed: false,
                 note: String::new(),
+                review: vec![],
             },
         }
     }
@@ -139,6 +151,7 @@ impl<'a> Analyzer<'a> {
             occurrences: vec![],
             reviewed: false,
             note: String::new(),
+            review: vec![],
         };
         let use_words = has_target_words(&self.config.locate) && self.config.locate.engine != Engine::Speech;
         let located = match self.config.locate.engine {
@@ -184,9 +197,42 @@ impl<'a> Analyzer<'a> {
         }
         result.occurrences = occs
             .into_iter()
-            .map(|o| OccurrenceResult { kinematics: kinematics_for(trial, &o, &self.config.kinematics), occurrence: o, edited: false })
+            .map(|o| OccurrenceResult {
+                kinematics: kinematics_for(trial, &o, &self.config.kinematics),
+                protocol: protocol::compute(trial, &o, &self.config.protocol, &self.config.kinematics, &[]),
+                occurrence: o,
+                edited: false,
+            })
             .collect();
+        apply_protocol_status(&mut result);
         result
+    }
+}
+
+/// Prefix of the status message set by [`apply_protocol_status`].
+pub const PROTOCOL_CHECK: &str = "please check: ";
+
+/// Marks a trial "please check" (low confidence) while its protocol
+/// landmarks carry warnings or the review across trials flagged it, and
+/// clears that mark when neither is the case any more.
+/// Low confidence for other reasons (the speech alignment) is left alone.
+pub fn apply_protocol_status(r: &mut TrialResult) {
+    if r.message.starts_with(PROTOCOL_CHECK) {
+        r.message.clear();
+        if r.status == TrialStatus::LowConfidence {
+            r.status = TrialStatus::Ok;
+        }
+    }
+    let warnings: Vec<String> = r
+        .occurrences
+        .iter()
+        .filter_map(|o| o.protocol.as_ref())
+        .flat_map(|p| p.warnings.iter().cloned())
+        .chain(r.review.iter().cloned())
+        .collect();
+    if r.status == TrialStatus::Ok && r.message.is_empty() && !warnings.is_empty() {
+        r.status = TrialStatus::LowConfidence;
+        r.message = format!("{PROTOCOL_CHECK}{}", warnings.join("; "));
     }
 }
 
@@ -231,12 +277,21 @@ pub fn keep_manual(trial: &Trial, new: &mut [KinematicResult], old: &[KinematicR
     }
 }
 
-/// Kinematics of an occurrence after its boundaries (or the settings)
-/// changed; hand-placed landmarks stay where the researcher put them.
-pub fn refresh_kinematics(trial: &Trial, o: &mut OccurrenceResult, cfg: &KinematicsConfig) {
-    let mut fresh = kinematics_for(trial, &o.occurrence, cfg);
-    keep_manual(trial, &mut fresh, &o.kinematics, cfg);
+/// Kinematics and protocol landmarks of an occurrence after its boundaries
+/// (or the settings) changed; hand-placed landmarks stay where the
+/// researcher put them.
+pub fn refresh_kinematics(trial: &Trial, o: &mut OccurrenceResult, cfg: &AnalysisConfig) {
+    let mut fresh = kinematics_for(trial, &o.occurrence, &cfg.kinematics);
+    keep_manual(trial, &mut fresh, &o.kinematics, &cfg.kinematics);
     o.kinematics = fresh;
+    refresh_protocol(trial, o, cfg);
+}
+
+/// Protocol landmarks and measures of an occurrence, keeping the landmarks
+/// placed by hand.
+pub fn refresh_protocol(trial: &Trial, o: &mut OccurrenceResult, cfg: &AnalysisConfig) {
+    let fixed = protocol::manual_landmarks(o.protocol.as_ref().filter(|p| p.kind == cfg.protocol.kind));
+    o.protocol = protocol::compute(trial, &o.occurrence, &cfg.protocol, &cfg.kinematics, &fixed);
 }
 
 pub fn models_dir_candidates(exe_dir: Option<PathBuf>) -> Vec<PathBuf> {

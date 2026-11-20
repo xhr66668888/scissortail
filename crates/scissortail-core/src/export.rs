@@ -114,6 +114,84 @@ fn status_str(r: &TrialResult) -> &'static str {
     }
 }
 
+/// Protocol landmarks and measures, wide format: one row per trial ×
+/// occurrence. Columns: identification, then for every landmark its time
+/// (s), time relative to the segment onset (ms), how it was found and
+/// whether it was placed by hand, then every measure, then the protocol's
+/// warnings and the review notes (a measure far from the other repetitions
+/// of its condition).
+pub fn measures_csv(rows: &[(&str, &TrialResult)]) -> String {
+    // landmark and measure columns in order of first appearance
+    let mut lm_ids: Vec<String> = vec![];
+    let mut ms_ids: Vec<String> = vec![];
+    for (_, r) in rows {
+        for o in &r.occurrences {
+            if let Some(p) = &o.protocol {
+                for l in &p.landmarks {
+                    if !lm_ids.contains(&l.id) {
+                        lm_ids.push(l.id.clone());
+                    }
+                }
+                for m in &p.measures {
+                    if !ms_ids.contains(&m.id) {
+                        ms_ids.push(m.id.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut header: Vec<String> = ["session", "trial", "occurrence", "word", "status", "reviewed", "edited", "protocol", "word_onset_s", "word_offset_s"].iter().map(|s| s.to_string()).collect();
+    for id in &lm_ids {
+        for suffix in ["time_s", "rel_onset_ms", "criterion", "manual"] {
+            header.push(format!("{id}_{suffix}"));
+        }
+    }
+    header.extend(ms_ids.iter().cloned());
+    header.push("warnings".into());
+    header.push("review".into());
+    header.push("file".into());
+    let mut out = header.join(",");
+    out.push('\n');
+    for (session, r) in rows {
+        for (k, o) in r.occurrences.iter().enumerate() {
+            let Some(p) = &o.protocol else { continue };
+            let oc = &o.occurrence;
+            let mut cells = vec![
+                esc(session),
+                esc(&r.trial_id),
+                (k + 1).to_string(),
+                esc(&oc.word),
+                status_str(r).to_string(),
+                r.reviewed.to_string(),
+                o.edited.to_string(),
+                p.kind.as_str().to_string(),
+                num(Some(oc.start_s), 4),
+                num(Some(oc.end_s), 4),
+            ];
+            for id in &lm_ids {
+                match p.landmark(id) {
+                    Some(l) => {
+                        cells.push(num(Some(l.time_s), 4));
+                        cells.push(num(Some((l.time_s - oc.start_s) * 1000.0), 1));
+                        cells.push(esc(&l.criterion));
+                        cells.push(l.manual.to_string());
+                    }
+                    None => cells.extend([String::new(), String::new(), String::new(), String::new()]),
+                }
+            }
+            for id in &ms_ids {
+                cells.push(num(p.measure(id), 2));
+            }
+            cells.push(esc(&p.warnings.join("; ")));
+            cells.push(esc(&r.review.join("; ")));
+            cells.push(esc(&r.file));
+            out.push_str(&cells.join(","));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// One row per occurrence with word boundaries and phone segmentation.
 pub fn write_segments_csv(path: &Path, session: &str, results: &[TrialResult]) -> Result<()> {
     let mut f = std::fs::File::create(path).map_err(|e| Error::Io(path.display().to_string(), e))?;

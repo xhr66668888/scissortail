@@ -12,9 +12,21 @@ For every trial it marks
 
 1. the **speech segment**: onset and offset of the target word (or, without a
    target word, of the main stretch of speech);
-2. for every articulator sensor (tongue tip, jaw, …) and dimension, the
-   **position peak (P)**, **velocity peak (V)** and **acceleration peak (A)**
-   inside that segment.
+2. the **landmarks and measures of a measurement protocol** (Settings →
+   Measurement protocol):
+   - **Jaw cycle + tongue-tip onset** (Masapollo & Nittrouer 2023; the default
+     for new workspaces): the six landmarks V1, PV1, MaxDisp, PV2, TT onset, V2
+     and from them the jaw vowel-cycle (JVC) duration, maximum jaw
+     displacement, tongue-tip onset latency and tongue-tip phase angle on the
+     jaw phase plane;
+   - **Gestural landmarks** (velocity threshold, the MVIEW `findgest`
+     convention): gesture onset, peak velocity, target, maximum constriction,
+     release, second peak velocity and offset per articulator, with
+     durations, displacement, peak velocity, stiffness and the lags between
+     articulators;
+   - **Peaks**: for every sensor and dimension the **position peak (P)**,
+     **velocity peak (V)** and **acceleration peak (A)** inside the segment
+     (always computed and exported).
 
 ## Installing
 
@@ -101,7 +113,71 @@ Coordinates (head-corrected AG50x): x = anterior(+), y = lateral, z = superior(+
 | Speech segment | Without a target word (or when it cannot be aligned): 10-ms energy envelope against an adaptive noise/peak threshold, pauses < 250 ms bridged, blips < 80 ms dropped; the segment with the most energy wins. |
 | Boundaries | Onset (and offset, when followed by silence) refined by segmented “hinge” regression on a 1-ms energy envelope. |
 | Kinematics | Zero-phase Butterworth low-pass (20 Hz) on position; velocity/acceleration from Savitzky–Golay local cubic regression (40 ms); peaks refined by quadratic regression (sub-sample timing). Peaks on the window edge are flagged. |
-| Hand-placed landmarks | Snap to the nearest local extremum within 10 screen pixels (quadratic refinement as above), or stay exactly where dropped (⌥ / Alt). They keep their time when the segment boundaries or the filter settings change; the value is re-read from the signal. |
+| Hand-placed landmarks | Snap to the nearest local extremum within 10 screen pixels (quadratic refinement as above), or stay exactly where dropped (⌥ / Alt). They keep their time when the segment boundaries or the filter settings change; the value is re-read from the signal. A hand-placed protocol landmark also re-positions the automatic landmarks that depend on it (e.g. moving V1 re-finds MaxDisp and PV1 inside the new cycle) and every measure. |
+
+### Measurement protocols
+
+**Jaw cycle + tongue-tip onset** (`crates/scissortail-core/src/protocol.rs`),
+after Masapollo & Nittrouer (2023, *JSLHR* 66, 901–915), on the vertical (z)
+signals:
+
+| landmark | rule |
+|---|---|
+| V1, V2 | Of all jaw lowering movements around the word (lowering-speed peaks ≥ 10 mm/s and ≥ 0.5 mm), the pair whose lowest points best match the two aligned vowels; each onset is the velocity zero crossing that starts the lowering — or, when the velocity takes more than 10 ms to go from zero to 1 cm/s (a gradual start, or no raising between the vowels), where it passes 1 cm/s. The paper's 0.5-mm displacement criterion for weak lowerings is available (off by default, see Validation). |
+| MaxDisp | Lowest jaw position in [V1, V2]; midpoint of a plateau (within 0.1 mm). |
+| PV1, PV2 | Peak lowering velocity in [V1, MaxDisp], peak raising velocity in [MaxDisp, V2]. |
+| TT onset | Tongue tip relative to the jaw (TT − JAW): onset of the fastest raising in [V1, V2 + 30 ms] — zero crossing, or 1 cm/s when gradual (15 ms); a raising that grows out of an earlier one without slowing below 1 cm/s starts with it. |
+| measures | JVC_Dur = V2 − V1; MaxJ_Disp = jaw position at MaxDisp; TT_Lat = TTonset − V1; TT_Pha = phase angle of TTonset on the jaw phase plane (displacement normalized to ±1 over the cycle, velocity over the half cycle; 0° = V1, 90° = PV1, 180° = MaxDisp, 270° = PV2); plus PV1, PV2 and the jaw opening (V1 − MaxDisp). |
+
+Trials are marked *please check* (amber) on two kinds of evidence, for any
+sensor: **the coding rules disagree** — the landmarks found with the
+alternative rules the paper allows (zero crossing only, 1 cm/s only, the
+0.5 mm displacement criterion, tongue onset with or without an earlier
+raising) move JVC duration or TT latency by more than 60 ms; for gestures, a
+10 % or 30 % threshold moves the onset or offset by more than 60 ms — or
+**the trial stands out among its repetitions**: a timing measure (ms or °)
+more than 3 robust SD (1.4826 × MAD, at least 8 ms / 8°) from the median of
+the same session, condition code in the file name (`T10_T292_SSad_1_NH_A_6` →
+`SSad_NH_A`) and target word, with at least 5 repetitions
+(`crates/scissortail-core/src/review.rs`; it is re-run after every analysis
+pass and every edit, and trials checked or edited by hand are never flagged).
+Ambiguous alignments (two jaw cycles fitting the word about equally well, two
+tongue-tip raisings, no clear onset) are flagged as before.
+
+**Gestural landmarks**: for each configured gesture (sensor, optional
+reference sensor subtracted, dimension, raising/lowering, and the aligned
+phone it belongs to), the constriction extremum (MAXC) nearest that phone,
+the peak velocities toward (PVEL) and away from it (PVEL2), and the points
+where the velocity crosses 20 % of those peaks: GONS, NONS, NOFFS, GOFFS.
+Measures per gesture: duration, formation, plateau, release, time to peak
+velocity, displacement, peak velocity, stiffness (peak velocity /
+displacement); for each later gesture its onset, target and constriction lag
+behind the first. Not yet validated against manual labels.
+
+### Validation of the jaw-cycle protocol
+
+Masapollo & Nittrouer's 10 adult talkers (2,269 tokens labelled independently
+by two trained coders in MVIEW, with discrepancies > 5 ms / 10 % reconciled).
+The rules were tuned on three talkers (8, 10, 11) and then frozen; the other
+seven are held out (1,642 tokens):
+
+| held-out talkers | ICC(A,1) | median \|error\| | RMSE | within 20 ms | coder vs coder (median) |
+|---|---|---|---|---|---|
+| JVC duration | 0.94 | 5.7 ms | 29.7 ms | 93 % | 1.4 ms |
+| TT latency | 0.96 | 5.9 ms | 22.5 ms | 91 % | 0.3 ms |
+| TT phase angle | 0.83 | 5.5° | 23.3° | 90 % (20°) | 0.0° |
+| max jaw displacement | 0.99 | 0.03 mm | 0.65 mm | 98 % (0.1 mm) | 0.00 mm |
+
+The paper's finding replicates with the automatic measures: in all 10 talkers
+TT latency correlates more strongly with JVC duration than TT phase angle does
+(mean r .87 vs .53; manual .93 vs .66). In 9 % of the held-out tokens the JVC
+duration or TT latency differs by more than 30 ms (7 % by more than 50 ms) —
+mostly where the coders placed a gradual onset differently (some coder pairs
+used the displacement criterion for unstressed vowels, others did not) or
+chose another of two tongue-tip raisings. The *please check* flag marks 15 %
+of the held-out tokens and catches two thirds of these (101 of 151; 76 % of
+those off by more than 50 ms); the unflagged tokens reach RMSE 14.3 ms (JVC)
+and 11.9 ms (TT latency).
 
 The alignment model runs with a fixed number of ONNX Runtime threads (2): the
 int8 model's posteriors change slightly with the thread count — enough to flip
@@ -134,7 +210,14 @@ carrier phrase, not the word.
 
 ## Export
 
-One CSV, long format — one row per file × segment × sensor × dimension:
+**Export CSV** writes the P / V / A table below; with a measurement protocol
+it also writes `…_measures.csv` next to it — wide format, one row per file ×
+segment: for every protocol landmark its time (s), time relative to the
+segment onset (ms), how it was found and whether it was placed by hand, then
+every measure (`JVC_Dur_ms`, `MaxJ_Disp_mm`, `TT_Lat_ms`, `TT_Pha_deg`, … or
+`TT_dur_ms`, `TT_onset_lag_ms`, …), the warnings and the review notes.
+
+The P / V / A table is one CSV, long format — one row per file × segment × sensor × dimension:
 segment onset/offset/duration, then for P, V and A the time (s), value, edge
 flag and time relative to the onset (ms). Since 0.2 the last columns are
 `segment_method` (`phonetic` / `speech`), `pos_peak_manual`,
@@ -200,7 +283,11 @@ Command-line tool (batch / scripting):
 cargo build --release -p scissortail-cli
 ./target/release/scissortail analyze <data folder> \
     --word "tˈɑdɑt=tadat@ad_" --word "tˈɛdɑt=tedat@ed_" \
-    --carrier "ɪts ə * əɡˈɛn" --csv landmarks.csv --out results.json
+    --carrier "ɪts ə * əɡˈɛn" --csv landmarks.csv --out results.json \
+    --protocol jaw-cycle --measures measures.csv
+# re-measure the saved segments with another protocol or rules (no re-alignment):
+./target/release/scissortail measure results.json --protocol gestures \
+    [--protocol-config rules.json] [--lowpass 20] [--sg-window 40] --measures gestures.csv
 ./target/release/scissortail synth "tˈɑdɑt" --voice af_heart --out tadat.wav
 ./target/release/scissortail inspect trial.mat
 ```

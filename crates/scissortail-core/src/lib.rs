@@ -11,6 +11,8 @@ pub mod kinematics;
 pub mod locate;
 pub mod mat;
 mod onnx;
+pub mod protocol;
+pub mod review;
 pub mod session;
 pub mod template;
 pub mod trial;

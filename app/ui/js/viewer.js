@@ -41,6 +41,14 @@ const TICK = 4;
 // The backend names the 3-D dimension "tangential"; tracks use "3d".
 const dimKey = (dim) => (dim === '3d' ? 'tangential' : dim);
 
+// Measurement-protocol landmarks: short tags, and the line style by kind
+// (solid = onset / offset, dashed = velocity peak, dotted = position extremum).
+const PROTOCOL_TAGS = { V1: 'V1', PV1: 'PV1', MaxDisp: 'MD', PV2: 'PV2', TTonset: 'TT', V2: 'V2' };
+const protocolTag = (id) => PROTOCOL_TAGS[id] || id.split('.').pop();
+const protocolPanel = (l) => (l.reference ? `${l.sensor}−${l.reference}` : l.sensor);
+const protocolDash = (l) => (l.curve === 'velocity' ? [5, 3] : /^(MaxDisp|.*\.MAXC)$/.test(l.id) ? [1.5, 2.5] : []);
+const TAG_GAP = 2;
+
 // Playback opens an AudioContext only for as long as it is needed. A context
 // left open in WKWebView goes silent for good once macOS switches the output
 // device (e.g. AirPods taken out): WebKit keeps rendering, the speaker gets
@@ -488,12 +496,29 @@ class SignalViewer {
   }
 
   // ------------------------------------------------------------- markers
-  /** Landmarks of the active segment for the shown dimension, one per sensor × signal. */
+  /** Landmarks of the active segment for the shown dimension: the measurement
+   *  protocol's when one is chosen, otherwise P / V / A per sensor × signal. */
   _collectMarkers() {
     const out = [];
     const occ = this.occ();
     if (!occ) return out;
     const dk = dimKey(this.display.dim);
+    if (occ.protocol && occ.protocol.landmarks?.length) {
+      for (const l of occ.protocol.landmarks) {
+        const panel = this.tracks.find((t) => t.kind === 'sensor' && t.sensor.name === protocolPanel(l));
+        if (!panel) continue;
+        const sig = l.curve === 'velocity' ? 'vel' : 'pos';
+        const key = `p|${l.id}`;
+        const dragging = this.drag?.type === 'landmark' && this.drag.key === key;
+        let peak = { time_s: l.time_s, value: sig === 'vel' ? l.velocity : l.position, manual: l.manual, at_edge: false };
+        if (dragging) peak = { ...peak, time_s: this.drag.t, value: this.drag.v, manual: true };
+        // a dot on the curve only where the landmark's dimension is shown
+        const row = l.dim === dk ? panel.rows.find((r) => r.sig === sig) || null : null;
+        out.push({ key, pid: l.id, panel, row, sig, peak, sensor: panel.sensor.name, dragging, data: panel.sensor.dims[this.display.dim][sig], fs: panel.sensor.fs,
+          tag: protocolTag(l.id), dash: protocolDash(l), unit: sig === 'vel' ? 'mm/s' : 'mm', title: l.label, criterion: l.criterion });
+      }
+      return out;
+    }
     for (const panel of this.tracks) {
       if (panel.kind !== 'sensor') continue;
       const kin = occ.kinematics.find((k) => k.sensor === panel.sensor.name && k.dim === dk);
@@ -501,33 +526,45 @@ class SignalViewer {
       for (const sig of ['pos', 'vel', 'acc']) {
         let peak = kin[SIG[sig].key];
         if (!peak) continue;
-        const dragging = this.drag?.type === 'landmark' && this.drag.sensor === panel.sensor.name && this.drag.sig === sig;
+        const key = `${panel.sensor.name}|${sig}`;
+        const dragging = this.drag?.type === 'landmark' && this.drag.key === key;
         if (dragging) peak = { ...peak, time_s: this.drag.t, value: this.drag.v, manual: true, at_edge: false };
         const row = panel.rows.find((r) => r.sig === sig) || null;
-        out.push({ panel, row, sig, peak, sensor: panel.sensor.name, dragging, data: panel.sensor.dims[this.display.dim][sig], fs: panel.sensor.fs });
+        out.push({ key, panel, row, sig, peak, sensor: panel.sensor.name, dragging, data: panel.sensor.dims[this.display.dim][sig], fs: panel.sensor.fs,
+          tag: SIG[sig].tag, dash: SIG[sig].dash, unit: SIG[sig].unit });
       }
     }
     return out;
+  }
+
+  /** Tags along the top edge of a panel, centred on their landmark and
+   *  nudged apart where they would overlap: [{ m, x (centre), w }]. */
+  _tagLayout(panel) {
+    const g = this.ctx;
+    g.font = `700 10px ${FONT}`;
+    const tags = this.markers.filter((m) => m.panel === panel)
+      .map((m) => ({ m, x: this.x(m.peak.time_s), w: Math.max(13, Math.ceil(g.measureText(m.tag).width) + 6) }))
+      .sort((a, b) => a.x - b.x);
+    for (let i = 1; i < tags.length; i++) {
+      const min = tags[i - 1].x + (tags[i - 1].w + tags[i].w) / 2 + TAG_GAP;
+      if (tags[i].x < min) tags[i].x = min;
+    }
+    return tags;
   }
 
   _drawMarkers(g) {
     this.markers = this._collectMarkers();
     const occ = this.occ();
     for (const panel of this.tracks.filter((t) => t.kind === 'sensor')) {
-      const ms = this.markers.filter((m) => m.panel === panel);
-      // tags along the top edge of the panel; nudge overlapping ones apart
-      const tags = ms.map((m) => ({ m, x: this.x(m.peak.time_s) })).sort((a, b) => a.x - b.x);
-      for (let i = 1; i < tags.length; i++) if (tags[i].x - tags[i - 1].x < 15) tags[i].x = tags[i - 1].x + 15;
-      for (const { m, x: tagX } of tags) {
+      for (const { m, x: tagX, w: tw } of this._tagLayout(panel)) {
         const px = this.x(m.peak.time_s);
         if (px < this.gutter - 1 || px > this.cssW - this.right + 1) continue;
-        const st = SIG[m.sig];
-        const hot = m.dragging || (this.hover?.marker && this.hover.marker.sensor === m.sensor && this.hover.marker.sig === m.sig);
+        const hot = m.dragging || (this.hover?.marker && this.hover.marker.key === m.key);
         const lx = Math.round(px) + 0.5;
         g.save();
         g.strokeStyle = INK;
         g.lineWidth = hot ? 2 : 1;
-        g.setLineDash(st.dash);
+        g.setLineDash(m.dash);
         g.beginPath();
         g.moveTo(lx, panel.top - 3);
         g.lineTo(lx, panel.y + panel.h - 1);
@@ -554,7 +591,7 @@ class SignalViewer {
           }
         }
         // tag: white = automatic, black = placed by hand
-        const tw = 13, th = 14, ty = panel.y;
+        const th = 14, ty = panel.y;
         const tx = Math.round(Math.min(Math.max(tagX - tw / 2, this.gutter + 1), this.cssW - this.right - tw - 1));
         g.fillStyle = m.peak.manual ? INK : PAPER;
         g.fillRect(tx, ty, tw, th);
@@ -562,7 +599,7 @@ class SignalViewer {
         g.lineWidth = 1;
         g.strokeRect(tx + 0.5, ty + 0.5, tw - 1, th - 1);
         if (hot) g.strokeRect(tx - 0.5, ty - 0.5, tw + 1, th + 1);
-        this._text(g, st.tag, tx + tw / 2, ty + th / 2 + 0.5, { size: 10, weight: 700, color: m.peak.manual ? PAPER : INK, align: 'center' });
+        this._text(g, m.tag, tx + tw / 2, ty + th / 2 + 0.5, { size: 10, weight: 700, color: m.peak.manual ? PAPER : INK, align: 'center' });
         g.restore();
         if (hot && occ) this._markerLabel(g, m, px, occ);
       }
@@ -584,9 +621,9 @@ class SignalViewer {
 
   /** A MATLAB-style data tip: X relative to the onset, Y the signal value. */
   _markerLabel(g, m, px, occ) {
-    const st = SIG[m.sig];
     const rel = (m.peak.time_s - occ.occurrence.start_s) * 1000;
-    const txt = `${st.tag}   X: ${rel >= 0 ? '+' : ''}${rel.toFixed(0)} ms   Y: ${fmtVal(m.peak.value)} ${st.unit}`;
+    const how = m.pid && !m.dragging && m.criterion ? `   (${m.criterion})` : '';
+    const txt = `${m.title || m.tag}   X: ${rel >= 0 ? '+' : ''}${rel.toFixed(0)} ms   Y: ${fmtVal(m.peak.value)} ${m.unit}${how}`;
     g.font = `400 11px ${FONT}`;
     const w = Math.ceil(g.measureText(txt).width) + 10;
     const y = (m.row?.yOf ? m.row.yOf(m.peak.value) : m.panel.top + 20) - 26;
@@ -812,9 +849,7 @@ class SignalViewer {
     if (!near.length) {
       // the tags along the top edge are handles too (they may be nudged apart)
       if (y <= panel.top) {
-        const tags = this.markers.filter((m) => m.panel === panel).map((m) => ({ m, x: this.x(m.peak.time_s) })).sort((a, b) => a.x - b.x);
-        for (let i = 1; i < tags.length; i++) if (tags[i].x - tags[i - 1].x < 15) tags[i].x = tags[i - 1].x + 15;
-        const hit = tags.find((t) => Math.abs(t.x - x) <= 7);
+        const hit = this._tagLayout(panel).find((t) => Math.abs(t.x - x) <= t.w / 2 + 1);
         return hit ? hit.m : null;
       }
       return null;
@@ -892,7 +927,7 @@ class SignalViewer {
       const inPanel = !!this._panelAt(y);
       const boundary = !marker ? this._hitBoundary(x) : null;
       if (marker) {
-        this.drag = { type: 'landmark', sensor: marker.sensor, panelSensor: marker.sensor, sig: marker.sig, data: marker.data, fs: marker.fs, orig: { ...marker.peak }, t: marker.peak.time_s, v: marker.peak.value, moved: false, snapped: false, x0: x };
+        this.drag = { type: 'landmark', key: marker.key, pid: marker.pid, sensor: marker.sensor, panelSensor: marker.sensor, sig: marker.sig, data: marker.data, fs: marker.fs, orig: { ...marker.peak }, t: marker.peak.time_s, v: marker.peak.value, moved: false, snapped: false, x0: x };
       } else if (boundary && !(inPanel && e.altKey)) {
         this.drag = { type: 'boundary', key: boundary, t: this.occ().occurrence[boundary], moved: false };
       } else if (e.shiftKey && !this.opts.readOnly) {
@@ -964,7 +999,11 @@ class SignalViewer {
       if (!d) return;
       this.drag = null;
       c.style.cursor = 'crosshair';
-      if (d.type === 'landmark' && d.moved) {
+      if (d.type === 'landmark' && d.moved && d.pid) {
+        const l = this.occ()?.protocol?.landmarks.find((x) => x.id === d.pid);
+        if (l) Object.assign(l, { time_s: d.t, manual: true, [d.sig === 'vel' ? 'velocity' : 'position']: d.v });
+        this.opts.onProtocolLandmarkChange?.({ id: d.pid, time_s: d.t, snap_s: d.snapped ? 2.5 / d.fs : 0 });
+      } else if (d.type === 'landmark' && d.moved) {
         const occ = this.occ();
         const kin = occ?.kinematics.find((k) => k.sensor === d.sensor && k.dim === dimKey(this.display.dim));
         const key = SIG[d.sig].key;
@@ -994,7 +1033,8 @@ class SignalViewer {
       const { x, y } = pos(e);
       const marker = this._hitMarker(x, y);
       if (marker) {
-        if (marker.peak.manual) this.opts.onLandmarkReset?.({ sensor: marker.sensor, dim: dimKey(this.display.dim), kind: SIG[marker.sig].key });
+        if (marker.peak.manual && marker.pid) this.opts.onProtocolLandmarkReset?.({ id: marker.pid });
+        else if (marker.peak.manual) this.opts.onLandmarkReset?.({ sensor: marker.sensor, dim: dimKey(this.display.dim), kind: SIG[marker.sig].key });
         return;
       }
       if (this.opts.onZoomToggle) this.opts.onZoomToggle();

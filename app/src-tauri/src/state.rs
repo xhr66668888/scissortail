@@ -43,9 +43,13 @@ pub fn engines_if_ready() -> Option<&'static Engines> {
 
 /// The "It's a ___ again" /tVCVt/ protocol of the bundled patient data: the
 /// target word is picked per trial from the file-name code (ad_, at_, ed_,
-/// et_), or the best-fitting one when the name carries no code.
+/// et_), or the best-fitting one when the name carries no code. The
+/// measurement protocol is the jaw cycle + tongue-tip onset of Masapollo &
+/// Nittrouer (2023), made for exactly these words. (Workspaces saved before
+/// protocols existed keep the P / V / A peaks until changed in Settings.)
 pub fn default_config() -> AnalysisConfig {
     let mut c = AnalysisConfig::default();
+    c.protocol.kind = scissortail_core::protocol::ProtocolKind::JawCycle;
     c.locate.carrier = "ɪts ə * əɡˈɛn".into();
     c.locate.words = [("tadat", "tˈɑdɑt", "ad_"), ("tatat", "tˈɑtɑt", "at_"), ("tedat", "tˈɛdɑt", "ed_"), ("tetat", "tˈɛtɑt", "et_")]
         .iter()

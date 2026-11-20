@@ -226,7 +226,7 @@ fn extremum(y: &[f64], lo: usize, hi: usize, mode: Polarity, reference: f64) -> 
 
 /// Refines a discrete extremum by least-squares quadratic regression over
 /// ±2 samples; returns (time, value).
-fn refine(y: &[f64], i: usize, fs: f64) -> (f64, f64) {
+pub(crate) fn refine(y: &[f64], i: usize, fs: f64) -> (f64, f64) {
     let lo = i.saturating_sub(2);
     let hi = (i + 2).min(y.len() - 1);
     if hi - lo < 2 {
@@ -250,7 +250,7 @@ fn make_peak(y: &[f64], lo: usize, hi: usize, mode: Polarity, reference: f64, fs
 }
 
 /// Linear interpolation of `y` (sampled at `fs`) at time `t`.
-fn value_at(y: &[f64], fs: f64, t: f64) -> f64 {
+pub(crate) fn value_at(y: &[f64], fs: f64, t: f64) -> f64 {
     let x = (t * fs).clamp(0.0, (y.len() - 1) as f64);
     let i = x.floor() as usize;
     let j = (i + 1).min(y.len() - 1);
